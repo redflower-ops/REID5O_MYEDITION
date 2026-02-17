@@ -1,74 +1,90 @@
 import json
 import os
 from typing import List, Dict
+
+from PIL import Image
+import torchvision.transforms as T
+
 from src.reid_system.data.sample_utils import make_sample
+from src.reid_system.data.path_utils import to_abs_path
 
 
 class OrBenchDataset:
+    """
+    ORBench 训练集 Dataset（当前版本仅用于 train）
+
+    - 读取 train_annos.json
+    - 解析 pid / modality
+    - 输出 image tensor + 其它字段
+    """
+
     def __init__(self, root: str, split: str = "train"):
-        # 数据集根目录，例如 ./data/ORBench
+        # 数据集根目录，例如 E:/.../data/ORBench
         self.root = root
 
-        # 数据划分（train 或 test）
+        # 数据划分（目前只支持 train）
         self.split = split
 
-        # 用来存放所有样本的列表
-        # 每个元素是一个字典 sample
+        # 样本列表（每条是统一 sample dict）
         self.samples: List[Dict] = []
 
-        # 根据 split 选择对应的标注文件
-        if split == "train":
-            anno_file = os.path.join(root, "train_annos.json")
+        # -----------------------------
+        # 训练/测试使用不同 transform
+        # -----------------------------
+        if self.split == "train":
+            # 训练：随机增强
+            self.transform = T.Compose([
+                T.Resize((384, 128)),
+                T.RandomHorizontalFlip(p=0.5),
+                T.Pad(10),
+                T.RandomCrop((384, 128)),
+                T.ToTensor(),
+                T.RandomErasing(p=0.25, scale=(0.02, 0.2), ratio=(0.3, 3.3)),
+            ])
         else:
-            anno_file = os.path.join(root, "test_gallery_and_queries.json")
+            # 测试/推理：确定性（但本 Dataset 暂不用于 test）
+            self.transform = T.Compose([
+                T.Resize((384, 128)),
+                T.ToTensor(),
+            ])
 
-        # 加载标注文件
-        self._load_annotations(anno_file)
+        # -----------------------------
+        # 加载标注
+        # -----------------------------
+        if self.split == "train":
+            anno_file = os.path.join(self.root, "train_annos.json")
+            self._load_annotations(anno_file)
+        else:
+            # test 不用这个 Dataset（test 走 OrBenchTestProtocol）
+            # 这里不加载，避免 samples 为空导致误用
+            pass
 
     # -----------------------------------------------------
     # 读取 JSON 并构造样本列表
     # -----------------------------------------------------
     def _load_annotations(self, anno_file: str):
-
         # 打开 JSON 标注文件
         with open(anno_file, "r", encoding="utf-8") as f:
-            data = json.load(f)   # data 是一个列表，每个元素是一个字典
+            data = json.load(f)  # 期望 data 是 list，每个元素是 dict
 
         # 遍历所有标注条目
         for item in data:
-
-            # 确保数据属于当前 split（train/test）
-            # 防止 test 数据混进 train
-            if item.get("split") != self.split:
+            # split 兼容：如果 item 没有 split 字段，默认认为属于当前 split
+            item_split = item.get("split", self.split)
+            if item_split != self.split:
                 continue
 
-            # 获取文件相对路径，例如：
-            # vis/0001/xxxx.jpg
+            # file_path 例如：vis/0001/xxxx.jpg
             file_path = item["file_path"]
 
-            # -------------------------
-            # 解析模态
-            # -------------------------
-            # vis / nir / cp / sk
-            modality = file_path.split("/")[0]
-
-            # -------------------------
-            # 解析 person id
-            # -------------------------
-            # 路径第二层就是 pid 文件夹
-            # vis/0001/xxx.jpg → 0001
+            # pid 从路径第二段解析：vis/0001/... -> 0001
             pid_str = file_path.split("/")[1]
-            pid = int(pid_str)   # 转换为整数，作为训练标签
+            pid = int(pid_str)
 
-            # 拼接成完整图片路径
-            full_path = os.path.join(self.root, file_path)
-
-            # caption 可能不存在，所以用 get，默认空字符串
+            # 文本描述（可能不存在）
             caption = item.get("caption", "")
 
-            # 用统一函数构造 sample
-            # 注意：这里存的是相对路径 file_path，不再拼接绝对路径
-            # 因为绝对路径属于“具体运行环境”，最好交给上层处理
+            # 统一构造 sample（存相对路径）
             sample = make_sample(
                 pid=pid,
                 file_path=file_path,
@@ -76,15 +92,30 @@ class OrBenchDataset:
                 source="train"
             )
 
+            # ✅ 只 append 一次（你之前重复 append 了）
             self.samples.append(sample)
 
-            # 添加到样本列表
-            self.samples.append(sample)
-
-    # 返回数据集总长度
     def __len__(self):
         return len(self.samples)
 
-    # 根据索引返回单条样本
     def __getitem__(self, index: int):
-        return self.samples[index]
+        # 取 sample（包含 file_path 等）
+        sample = self.samples[index]
+
+        # 拼接绝对路径
+        abs_path = to_abs_path(self.root, sample)
+
+        # 读取图像（统一转 RGB 三通道）
+        img = Image.open(abs_path).convert("RGB")
+
+        # 图像预处理 -> tensor
+        img_tensor = self.transform(img)
+
+        # 返回训练用样本（image tensor + 标签等）
+        return {
+            "image": img_tensor,  # Tensor [3,384,128]
+            "pid": sample["pid"],
+            "modality": sample["modality"],
+            "caption": sample["caption"],
+            "source": sample["source"]
+        }
