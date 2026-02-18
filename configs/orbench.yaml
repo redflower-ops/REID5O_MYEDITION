@@ -6,16 +6,22 @@ project:
 data:
   dataset_name: "ORBench"
   root: "./data/ORBench"
-  modalities: ["rgb"]
   batch_size: 8
   num_workers: 0
 
+model:
+  embedding_dim: 128
+  # 训练后会自动按 train_annos 的 PID 数覆盖；仅在加载 ckpt 做 eval/infer 前需要填写
+  num_classes: 1000
+
 train:
-  epochs: 1
+  epochs: 3
   lr: 0.0003
+  checkpoint_path: "checkpoints/tiny_cnn.pt"
 
 eval:
+  query_protocol: "NIR"
   topk: 10
 
 infer:
-  topk: 10
+  topk: 5
